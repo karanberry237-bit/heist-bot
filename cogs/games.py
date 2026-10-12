@@ -72,12 +72,12 @@ def is_blackjack(cards) -> bool:
 
 
 class BlackjackView(discord.ui.View):
-    def __init__(self, cog: "Games", interaction: discord.Interaction, bet: int):
+    def __init__(self, cog: "Games", ctx: commands.Context, bet: int):
         super().__init__(timeout=90)
         self.cog = cog
         self.db = cog.db
-        self.interaction = interaction
-        self.user = interaction.user
+        self.user = ctx.author
+        self.message: discord.Message | None = None  # set after the game message is sent
         self.bet = bet
         self.deck = new_deck()
         self.player = [self.deck.pop(), self.deck.pop()]
@@ -227,10 +227,11 @@ class BlackjackView(discord.ui.View):
             self.play_dealer()
             e = await self.settle(self.compare())
             e.set_footer(text=f"Bet: {self.bet:,} • Timed out, auto-stand")
-            try:
-                await self.interaction.edit_original_response(embed=e, view=None)
-            except discord.HTTPException:
-                pass
+            if self.message:
+                try:
+                    await self.message.edit(embed=e, view=None)
+                except discord.HTTPException:
+                    pass
 
 
 # ---------------------------------------------------------------- cog
@@ -241,15 +242,15 @@ class Games(commands.Cog):
         self.db = bot.db
         self.active_blackjack: set[int] = set()
 
-    async def take_bet(self, interaction: discord.Interaction, raw: str) -> int | None:
+    async def take_bet(self, ctx: commands.Context, raw: str) -> int | None:
         """Parses the bet and removes it from the wallet. Returns the bet,
         or None (after replying with an error) if the bet is invalid."""
-        uid = interaction.user.id
+        uid = ctx.author.id
         balance = await self.db.get_balance(uid)
         bet = parse_bet(raw, balance)
 
         async def fail(msg: str):
-            await interaction.response.send_message(embed=error_embed(msg), ephemeral=True)
+            await ctx.send(embed=error_embed(msg), ephemeral=True)
 
         if bet is None:
             await fail("Invalid bet. Use a number, `all`, `half`, or something like `5k`.")
@@ -265,55 +266,60 @@ class Games(commands.Cog):
             return None
         return bet
 
-    # ----- /coinflip
+    # ----- coinflip
 
-    @app_commands.command(name="coinflip", description="Flip a coin. Double your bet or lose it")
+    @commands.hybrid_command(
+        name="coinflip", aliases=["cf", "flip"], description="Flip a coin. Double your bet or lose it"
+    )
     @everywhere
     @app_commands.describe(bet="Amount, or 'all' / 'half' / '5k'", side="Heads or tails")
     @app_commands.choices(
         side=[app_commands.Choice(name="Heads", value="heads"), app_commands.Choice(name="Tails", value="tails")]
     )
-    async def coinflip(self, interaction: discord.Interaction, bet: str, side: app_commands.Choice[str]):
-        amount = await self.take_bet(interaction, bet)
+    async def coinflip(self, ctx: commands.Context, bet: str, side: str):
+        side = {"h": "heads", "heads": "heads", "t": "tails", "tails": "tails"}.get(side.strip().lower())
+        if side is None:
+            return await ctx.send(embed=error_embed("Pick `heads` or `tails`."), ephemeral=True)
+        amount = await self.take_bet(ctx, bet)
         if amount is None:
             return
         result = random.choice(["heads", "tails"])
-        won = result == side.value
+        won = result == side
         if won:
-            await self.db.change_balance(interaction.user.id, amount * 2)
-        balance = await self.db.get_balance(interaction.user.id)
+            await self.db.change_balance(ctx.author.id, amount * 2)
+        balance = await self.db.get_balance(ctx.author.id)
         if won:
             e = embed("🪙 Coinflip", f"It landed on **{result}**!\n✅ You won {money(amount)}", color=GREEN)
         else:
             e = embed("🪙 Coinflip", f"It landed on **{result}**.\n❌ You lost {money(amount)}", color=RED)
-        e.set_footer(text=f"You picked {side.value}")
+        e.set_footer(text=f"You picked {side}")
         e.add_field(name="Balance", value=money(balance))
-        await interaction.response.send_message(embed=e)
+        await ctx.send(embed=e)
 
-    # ----- /slots
+    # ----- slots
 
-    @app_commands.command(name="slots", description="Spin the slot machine")
+    @commands.hybrid_command(name="slots", aliases=["slot"], description="Spin the slot machine")
     @everywhere
     @app_commands.describe(bet="Amount, or 'all' / 'half' / '5k'")
-    async def slots(self, interaction: discord.Interaction, bet: str):
-        amount = await self.take_bet(interaction, bet)
+    async def slots(self, ctx: commands.Context, bet: str):
+        amount = await self.take_bet(ctx, bet)
         if amount is None:
             return
         reels = random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
         mult = slot_multiplier(reels)
         payout = int(amount * mult)
         if payout:
-            await self.db.change_balance(interaction.user.id, payout)
-        balance = await self.db.get_balance(interaction.user.id)
+            await self.db.change_balance(ctx.author.id, payout)
+        balance = await self.db.get_balance(ctx.author.id)
 
         def frame(shown: int) -> str:
             cells = [reels[i] if i < shown else "❓" for i in range(3)]
             return f"## [ {' | '.join(cells)} ]"
 
-        await interaction.response.send_message(embed=embed("🎰 Slots", frame(0)))
+        msg = await ctx.send(embed=embed("🎰 Slots", frame(0)))
         for shown in (1, 2):
             await asyncio.sleep(0.8)
-            await interaction.edit_original_response(embed=embed("🎰 Slots", frame(shown)))
+            await msg.edit(embed=embed("🎰 Slots", frame(shown)))
         await asyncio.sleep(0.8)
 
         net = payout - amount
@@ -325,36 +331,37 @@ class Games(commands.Cog):
             text, color = f"❌ No match. You lost {money(amount)}", RED
         e = embed("🎰 Slots", f"{frame(3)}\n{text}", color=color)
         e.add_field(name="Balance", value=money(balance))
-        await interaction.edit_original_response(embed=e)
+        await msg.edit(embed=e)
 
-    # ----- /blackjack
+    # ----- blackjack
 
-    @app_commands.command(name="blackjack", description="Play blackjack against the dealer")
+    @commands.hybrid_command(name="blackjack", aliases=["bj"], description="Play blackjack against the dealer")
     @everywhere
     @app_commands.describe(bet="Amount, or 'all' / 'half' / '5k'")
-    async def blackjack(self, interaction: discord.Interaction, bet: str):
-        uid = interaction.user.id
+    async def blackjack(self, ctx: commands.Context, bet: str):
+        uid = ctx.author.id
         if uid in self.active_blackjack:
-            return await interaction.response.send_message(
-                embed=error_embed("You already have a blackjack game running. Finish it first."),
-                ephemeral=True,
+            return await ctx.send(
+                embed=error_embed("You already have a blackjack game running. Finish it first."), ephemeral=True
             )
-        amount = await self.take_bet(interaction, bet)
+        amount = await self.take_bet(ctx, bet)
         if amount is None:
             return
         self.active_blackjack.add(uid)
+        view = None
         try:
-            view = BlackjackView(self, interaction, amount)
+            view = BlackjackView(self, ctx, amount)
             outcome = view.initial_outcome()
             if outcome:
                 e = await view.settle(outcome)
-                await interaction.response.send_message(embed=e)
+                await ctx.send(embed=e)
             else:
-                await interaction.response.send_message(embed=view.render(), view=view)
+                view.message = await ctx.send(embed=view.render(), view=view)
         except Exception:
             # Something broke before the game started: refund the bet.
             self.active_blackjack.discard(uid)
-            await self.db.change_balance(uid, amount)
+            if not (view and view.finished):
+                await self.db.change_balance(uid, amount)
             raise
 
 
