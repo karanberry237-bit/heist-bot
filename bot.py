@@ -11,7 +11,7 @@ from utils import error_embed
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
 
-PREFIX = os.getenv("PREFIX", ",")
+PREFIX = os.getenv("PREFIX", ",sonl")
 EXTENSIONS = ["cogs.economy", "cogs.games", "cogs.moderation"]
 
 
@@ -72,7 +72,8 @@ class HeistBot(commands.Bot):
             error,
             (commands.MissingRequiredArgument, commands.BadArgument, commands.BadUnionArgument, commands.TooManyArguments),
         ):
-            usage = f"{ctx.clean_prefix}{ctx.command.qualified_name} {ctx.command.signature}".strip()
+            sep = " " if ctx.clean_prefix[-1:].isalnum() else ""  # ",sonl ban" vs "/ban"
+            usage = f"{ctx.clean_prefix}{sep}{ctx.command.qualified_name} {ctx.command.signature}".strip()
             return await ctx.send(embed=error_embed(f"Invalid input. Usage: `{usage}`"), ephemeral=True)
 
         log.error("Command error in %s", ctx.command, exc_info=error)
