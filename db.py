@@ -27,6 +27,22 @@ CREATE TABLE IF NOT EXISTS cooldowns (
 );
 
 CREATE INDEX IF NOT EXISTS users_balance_idx ON users (balance DESC);
+
+CREATE TABLE IF NOT EXISTS guild_config (
+    guild_id     BIGINT PRIMARY KEY,
+    mod_role_id  BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS warnings (
+    id          BIGSERIAL PRIMARY KEY,
+    guild_id    BIGINT NOT NULL,
+    user_id     BIGINT NOT NULL,
+    mod_id      BIGINT NOT NULL,
+    reason      TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS warnings_user_idx ON warnings (guild_id, user_id);
 """
 
 
@@ -157,4 +173,56 @@ class Database:
             RETURNING daily_streak
             """,
             user_id,
+        )
+
+    # ---------- moderation config ----------
+
+    async def get_mod_role(self, guild_id: int) -> int | None:
+        return await self.pool.fetchval(
+            "SELECT mod_role_id FROM guild_config WHERE guild_id = $1", guild_id
+        )
+
+    async def set_mod_role(self, guild_id: int, role_id: int | None):
+        await self.pool.execute(
+            """
+            INSERT INTO guild_config (guild_id, mod_role_id) VALUES ($1, $2)
+            ON CONFLICT (guild_id) DO UPDATE SET mod_role_id = EXCLUDED.mod_role_id
+            """,
+            guild_id,
+            role_id,
+        )
+
+    # ---------- warnings ----------
+
+    async def add_warning(self, guild_id: int, user_id: int, mod_id: int, reason: str) -> tuple[int, int]:
+        """Returns (warning_id, total_warnings_for_user)."""
+        async with self.pool.acquire() as conn:
+            warn_id = await conn.fetchval(
+                "INSERT INTO warnings (guild_id, user_id, mod_id, reason) VALUES ($1, $2, $3, $4) RETURNING id",
+                guild_id, user_id, mod_id, reason,
+            )
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM warnings WHERE guild_id = $1 AND user_id = $2", guild_id, user_id
+            )
+        return warn_id, total
+
+    async def list_warnings(self, guild_id: int, user_id: int, limit: int = 10):
+        rows = await self.pool.fetch(
+            """
+            SELECT id, mod_id, reason, created_at FROM warnings
+            WHERE guild_id = $1 AND user_id = $2 ORDER BY id DESC LIMIT $3
+            """,
+            guild_id, user_id, limit,
+        )
+        total = await self.pool.fetchval(
+            "SELECT COUNT(*) FROM warnings WHERE guild_id = $1 AND user_id = $2", guild_id, user_id
+        )
+        return rows, total
+
+    async def delete_warning(self, guild_id: int, warn_id: int) -> bool:
+        """Scoped to the guild so one server can't delete another's warnings."""
+        return bool(
+            await self.pool.fetchval(
+                "DELETE FROM warnings WHERE id = $1 AND guild_id = $2 RETURNING 1", warn_id, guild_id
+            )
         )

@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("bot")
 
 PREFIX = os.getenv("PREFIX", ",")
-EXTENSIONS = ["cogs.economy", "cogs.games"]
+EXTENSIONS = ["cogs.economy", "cogs.games", "cogs.moderation"]
 
 
 class HeistBot(commands.Bot):
@@ -61,6 +61,12 @@ class HeistBot(commands.Bot):
             return
         if isinstance(error, commands.CommandInvokeError):
             error = error.original
+
+        # Permission problems: not a moderator, missing Discord perms, DM use, etc.
+        if isinstance(error, commands.CheckFailure):
+            return await ctx.send(
+                embed=error_embed(str(error) or "You can't use this command."), ephemeral=True
+            )
 
         if isinstance(
             error,
