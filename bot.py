@@ -11,7 +11,7 @@ from utils import error_embed
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
 
-EXTENSIONS = ["cogs.economy"]
+EXTENSIONS = ["cogs.economy", "cogs.games"]
 
 
 class HeistBot(commands.Bot):
