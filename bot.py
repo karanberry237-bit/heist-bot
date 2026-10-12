@@ -11,15 +11,22 @@ from utils import error_embed
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
 
+PREFIX = os.getenv("PREFIX", ",")
 EXTENSIONS = ["cogs.economy", "cogs.games"]
 
 
 class HeistBot(commands.Bot):
     def __init__(self):
+        intents = discord.Intents.default()
+        # Privileged intent: required for prefix commands (e.g. ",balance").
+        # Enable "Message Content Intent" in the Developer Portal -> Bot tab.
+        intents.message_content = True
         super().__init__(
-            command_prefix=commands.when_mentioned,  # slash-only bot
-            intents=discord.Intents.default(),
+            command_prefix=commands.when_mentioned_or(PREFIX),
+            intents=intents,
             help_command=None,
+            case_insensitive=True,
+            strip_after_prefix=True,  # allows ", balance" as well as ",balance"
         )
         self.db = Database()
 
@@ -46,10 +53,27 @@ class HeistBot(commands.Bot):
                 log.info("Synced commands globally")
 
     async def on_ready(self):
-        log.info("Logged in as %s (%s)", self.user, self.user.id)
+        log.info("Logged in as %s (%s) | prefix: %s", self.user, self.user.id, PREFIX)
+
+    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
+        """Handles errors for both prefix and slash (hybrid) invocations."""
+        if isinstance(error, commands.CommandNotFound):
+            return
+        if isinstance(error, commands.CommandInvokeError):
+            error = error.original
+
+        if isinstance(
+            error,
+            (commands.MissingRequiredArgument, commands.BadArgument, commands.BadUnionArgument, commands.TooManyArguments),
+        ):
+            usage = f"{ctx.clean_prefix}{ctx.command.qualified_name} {ctx.command.signature}".strip()
+            return await ctx.send(embed=error_embed(f"Invalid input. Usage: `{usage}`"), ephemeral=True)
+
+        log.error("Command error in %s", ctx.command, exc_info=error)
+        await ctx.send(embed=error_embed("Something went wrong. Please try again."), ephemeral=True)
 
     async def on_tree_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        log.exception("Command error", exc_info=error)
+        log.error("App command error", exc_info=error)
         msg = error_embed("Something went wrong. Please try again.")
         if interaction.response.is_done():
             await interaction.followup.send(embed=msg, ephemeral=True)
