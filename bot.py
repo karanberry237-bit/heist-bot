@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("bot")
 
 PREFIX = os.getenv("PREFIX", ",sonl")
-EXTENSIONS = ["cogs.economy", "cogs.games", "cogs.moderation"]
+EXTENSIONS = ["cogs.economy", "cogs.games", "cogs.moderation", "cogs.stats"]
 
 
 class HeistBot(commands.Bot):
@@ -88,6 +88,10 @@ class HeistBot(commands.Bot):
             await interaction.response.send_message(embed=msg, ephemeral=True)
 
     async def close(self):
+        # Save buffered stats before the shared DB pool is closed.
+        stats = self.get_cog("Stats")
+        if stats:
+            await stats.flush()
         await self.db.close()
         await super().close()
 
