@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("bot")
 
 PREFIX = os.getenv("PREFIX", ",sonl")
-EXTENSIONS = ["cogs.economy", "cogs.games", "cogs.moderation", "cogs.stats", "cogs.leveling", "cogs.setup"]
+EXTENSIONS = ["cogs.economy", "cogs.games", "cogs.moderation", "cogs.stats", "cogs.leveling", "cogs.setup", "cogs.help"]
 
 
 class HeistBot(commands.Bot):

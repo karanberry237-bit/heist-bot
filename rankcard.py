@@ -159,3 +159,61 @@ def render_rank_card(d: dict) -> io.BytesIO:
     img.resize((W, H), RESAMPLE).save(out, "PNG")
     out.seek(0)
     return out
+
+
+def render_help_banner(title: str, subtitle: str, avatar: bytes = None) -> io.BytesIO:
+    """Gradient banner shown at the top of the help menu."""
+    w, h = 1000, 260
+    big = (w * S, h * S)
+    left = Image.new("RGB", big, (99, 45, 224))
+    right = Image.new("RGB", big, (236, 72, 153))
+    mask = Image.linear_gradient("L").rotate(90, expand=True).resize(big)
+    banner = Image.composite(right, left, mask).convert("RGBA")
+
+    # soft decorative circles + dot grid
+    ov = Image.new("RGBA", big, (0, 0, 0, 0))
+    od = ImageDraw.Draw(ov)
+    for cx, cy, r, a in ((860, 40, 190, 34), (700, 250, 130, 26), (980, 230, 110, 30)):
+        od.ellipse([(cx - r) * S, (cy - r) * S, (cx + r) * S, (cy + r) * S], fill=(255, 255, 255, a))
+    for gx in range(24, w, 36):
+        for gy in range(20, h, 36):
+            od.ellipse([(gx - 1.5) * S, (gy - 1.5) * S, (gx + 1.5) * S, (gy + 1.5) * S], fill=(255, 255, 255, 38))
+    banner.alpha_composite(ov)
+    dr = ImageDraw.Draw(banner, "RGBA")
+
+    x_text = 56
+    if avatar:
+        try:
+            size = 150
+            a = Image.open(io.BytesIO(avatar)).convert("RGBA").resize((size * S, size * S), RESAMPLE)
+            m = Image.new("L", a.size, 0)
+            ImageDraw.Draw(m).ellipse([0, 0, a.size[0] - 1, a.size[1] - 1], fill=255)
+            ax, ay = 52, (h - size) // 2
+            dr.ellipse([(ax - 5) * S, (ay - 5) * S, (ax + size + 5) * S, (ay + size + 5) * S],
+                       fill=(255, 255, 255, 235))
+            banner.paste(a, (ax * S, ay * S), m)
+            x_text = ax + size + 44
+        except Exception:
+            pass
+
+    def shadowed(x, y, s, font, fill):
+        dr.text(((x + 2) * S, (y + 3) * S), s, font=font, fill=(0, 0, 0, 90))
+        dr.text((x * S, y * S), s, font=font, fill=fill)
+
+    size = 60
+    while dr.textlength(title, font=F(size, True)) / S > (w - x_text - 40) and size > 30:
+        size -= 4
+    shadowed(x_text, 62, "C O M M A N D   C E N T E R", F(15, True), (255, 255, 255, 215))
+    shadowed(x_text, 88, title, F(size, True), (255, 255, 255, 255))
+    sub = subtitle
+    while dr.textlength(sub, font=F(20)) / S > (w - x_text - 40) and len(sub) > 4:
+        sub = sub[:-2]
+    shadowed(x_text, 88 + size + 20, sub, F(20), (255, 255, 255, 225))
+
+    rounded = Image.new("L", big, 0)
+    ImageDraw.Draw(rounded).rounded_rectangle([0, 0, big[0] - 1, big[1] - 1], radius=22 * S, fill=255)
+    banner.putalpha(rounded)
+    out = io.BytesIO()
+    banner.resize((w, h), RESAMPLE).save(out, "PNG")
+    out.seek(0)
+    return out
