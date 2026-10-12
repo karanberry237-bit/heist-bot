@@ -383,7 +383,7 @@ class Moderation(commands.Cog):
     @commands.hybrid_command(name="delwarn", aliases=["unwarn"], description="Delete a warning by its ID")
     @mod_only
     @app_commands.describe(warning_id="The number shown next to the warning, e.g. 12")
-    async def delwarn(self, ctx: commands.Context, warning_id: app_commands.Range[int, 1, 2**62]):
+    async def delwarn(self, ctx: commands.Context, warning_id: app_commands.Range[int, 1, 2**54]):
         if not await self.db.delete_warning(ctx.guild.id, warning_id):
             return await fail(ctx, f"No warning `#{warning_id}` found in this server.")
         await ctx.send(embed=embed("Warning deleted", f"Warning `#{warning_id}` was removed."))
