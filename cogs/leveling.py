@@ -8,14 +8,19 @@
   - Level-up messages go to the levels channel made by /setup, or to the channel
     the member was chatting in if /setup hasn't been run.
 """
+import asyncio
 import logging
 import random
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import asyncpg
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+
+from rankcard import render_rank_card
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +63,53 @@ def level_from_xp(xp: int):
 
 def total_xp_for_level(level: int) -> int:
     return sum(xp_for_next(l) for l in range(level))
+
+
+STAT_FILTER = "guild_id=$1 AND user_id=$2 AND hour >= now() - interval '14 days'"
+MSG_SUM = (
+    "SELECT COALESCE(SUM(count) FILTER (WHERE hour >= now() - interval '1 day'), 0) a, "
+    "COALESCE(SUM(count) FILTER (WHERE hour >= now() - interval '7 days'), 0) b, "
+    f"COALESCE(SUM(count), 0) c FROM stat_messages WHERE {STAT_FILTER}"
+)
+VOICE_SUM = (
+    "SELECT COALESCE(SUM(seconds) FILTER (WHERE hour >= now() - interval '1 day'), 0) a, "
+    "COALESCE(SUM(seconds) FILTER (WHERE hour >= now() - interval '7 days'), 0) b, "
+    f"COALESCE(SUM(seconds), 0) c FROM stat_voice WHERE {STAT_FILTER} AND state <> 'afk'"
+)
+TOP_MSG = f"SELECT channel_id, SUM(count) v FROM stat_messages WHERE {STAT_FILTER} GROUP BY 1 ORDER BY v DESC LIMIT 2"
+TOP_VOICE = (f"SELECT channel_id, SUM(seconds) v FROM stat_voice WHERE {STAT_FILTER} AND state <> 'afk' "
+             "GROUP BY 1 ORDER BY v DESC LIMIT 1")
+DAY_MSG = f"SELECT (hour AT TIME ZONE 'UTC')::date d, SUM(count) v FROM stat_messages WHERE {STAT_FILTER} GROUP BY 1"
+DAY_VOICE = (f"SELECT (hour AT TIME ZONE 'UTC')::date d, SUM(seconds) / 3600.0 v FROM stat_voice "
+             f"WHERE {STAT_FILTER} AND state <> 'afk' GROUP BY 1")
+
+
+def fmt_date(dt) -> str:
+    return f"{dt:%B} {dt.day}, {dt.year}" if dt else "Unknown"
+
+
+class RankView(discord.ui.View):
+    """Refresh button under the rank card (only the person who ran it can use it)."""
+
+    def __init__(self, cog, guild, member, owner_id):
+        super().__init__(timeout=180)
+        self.cog, self.guild, self.member, self.owner_id = cog, guild, member, owner_id
+        self.message = None
+
+    @discord.ui.button(emoji="🔄", style=discord.ButtonStyle.secondary)
+    async def refresh(self, itx: discord.Interaction, button: discord.ui.Button):
+        if itx.user.id != self.owner_id:
+            return await itx.response.send_message("Only the person who ran this can refresh it.", ephemeral=True)
+        await itx.response.defer()
+        buf = await self.cog.rank_png(self.guild, self.member)
+        await itx.edit_original_response(attachments=[discord.File(buf, "rank.png")])
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except discord.HTTPException:
+                pass
 
 
 class Leveling(commands.Cog):
@@ -174,25 +226,65 @@ class Leveling(commands.Cog):
         await self.bot.wait_until_ready()
 
     # ------------------------------------------------------------------ commands
-    @app_commands.command(name="rank", description="Show your level and XP")
+    async def rank_png(self, guild: discord.Guild, member: discord.Member):
+        gid, uid = guild.id, member.id
+        xp = await self.pool.fetchval("SELECT xp FROM levels WHERE guild_id=$1 AND user_id=$2", gid, uid) or 0
+        level, into = level_from_xp(xp)
+        pos = await self.pool.fetchval("SELECT COUNT(*) + 1 FROM levels WHERE guild_id=$1 AND xp > $2", gid, xp)
+
+        msgs, voice = [0, 0, 0], [0.0, 0.0, 0.0]
+        top_m, top_v, day_m, day_v = [], [], {}, {}
+        try:
+            r = await self.pool.fetchrow(MSG_SUM, gid, uid)
+            msgs = [int(r["a"]), int(r["b"]), int(r["c"])]
+            r = await self.pool.fetchrow(VOICE_SUM, gid, uid)
+            voice = [int(r["a"]) / 3600, int(r["b"]) / 3600, int(r["c"]) / 3600]
+            top_m = await self.pool.fetch(TOP_MSG, gid, uid)
+            top_v = await self.pool.fetch(TOP_VOICE, gid, uid)
+            day_m = {r["d"]: float(r["v"]) for r in await self.pool.fetch(DAY_MSG, gid, uid)}
+            day_v = {r["d"]: float(r["v"]) for r in await self.pool.fetch(DAY_VOICE, gid, uid)}
+        except asyncpg.PostgresError:
+            log.warning("stat tables unavailable; rank card will show zeros (is cogs.stats loaded?)")
+
+        def chan(cid):
+            ch = guild.get_channel(cid)
+            return ch.name if ch else "deleted-channel"
+
+        top = []
+        best = int(top_m[0]["v"]) if top_m else 1
+        for r in top_m:
+            top.append({"kind": "#", "label": chan(r["channel_id"]),
+                        "value": f"{int(r['v']):,} messages", "frac": int(r["v"]) / best})
+        while len(top) < 2:
+            top.append(None)
+        top.append({"kind": "VC", "label": chan(top_v[0]["channel_id"]),
+                    "value": f"{int(top_v[0]['v']) / 3600:.1f} hours", "frac": 1.0} if top_v else None)
+
+        today = datetime.now(timezone.utc).date()
+        days = [today - timedelta(days=13 - i) for i in range(14)]
+        try:
+            avatar = await member.display_avatar.replace(size=128, format="png").read()
+        except discord.HTTPException:
+            avatar = None
+
+        data = {
+            "name": member.display_name, "server": guild.name, "avatar": avatar,
+            "created": fmt_date(member.created_at), "joined": fmt_date(member.joined_at),
+            "level": level, "rank": pos, "xp_into": into, "xp_need": xp_for_next(level),
+            "msgs": msgs, "voice": voice, "top": top,
+            "chart_m": [day_m.get(d, 0.0) for d in days], "chart_v": [day_v.get(d, 0.0) for d in days],
+            "bot": self.bot.user.name if self.bot.user else "Bot",
+        }
+        return await asyncio.to_thread(render_rank_card, data)
+
+    @app_commands.command(name="rank", description="Show a member's level card")
     @guild_only_cmd
     async def rank(self, itx: discord.Interaction, member: Optional[discord.Member] = None):
         member = member or itx.user
-        xp = await self.pool.fetchval(
-            "SELECT xp FROM levels WHERE guild_id=$1 AND user_id=$2", itx.guild_id, member.id) or 0
-        level, into = level_from_xp(xp)
-        need = xp_for_next(level)
-        pos = await self.pool.fetchval(
-            "SELECT COUNT(*) + 1 FROM levels WHERE guild_id=$1 AND xp > $2", itx.guild_id, xp)
-        filled = int(10 * into / need)
-        bar = "█" * filled + "░" * (10 - filled)
-        e = discord.Embed(title=f"{member.display_name}'s rank", color=0x5865F2)
-        e.set_thumbnail(url=member.display_avatar.url)
-        e.add_field(name="Level", value=str(level))
-        e.add_field(name="Server rank", value=f"#{pos}")
-        e.add_field(name="Total XP", value=f"{xp:,}")
-        e.add_field(name=f"Progress to level {level + 1}", value=f"`{bar}` {into:,} / {need:,} XP", inline=False)
-        await itx.response.send_message(embed=e)
+        await itx.response.defer()
+        buf = await self.rank_png(itx.guild, member)
+        view = RankView(self, itx.guild, member, itx.user.id)
+        view.message = await itx.followup.send(file=discord.File(buf, "rank.png"), view=view, wait=True)
 
     @app_commands.command(name="levels", description="Server XP leaderboard")
     @guild_only_cmd
