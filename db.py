@@ -1,4 +1,14 @@
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
 import asyncpg
+
+
+def clean_dsn(dsn: str) -> str:
+    """Neon adds a channel_binding option that asyncpg rejects. Strip it so
+    the connection string works as copied from the Neon dashboard."""
+    parts = urlsplit(dsn.strip())
+    query = [(k, v) for k, v in parse_qsl(parts.query) if k != "channel_binding"]
+    return urlunsplit(parts._replace(query=urlencode(query)))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -25,7 +35,14 @@ class Database:
         self.pool: asyncpg.Pool | None = None
 
     async def connect(self, dsn: str):
-        self.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=10)
+        self.pool = await asyncpg.create_pool(
+            clean_dsn(dsn),
+            min_size=1,
+            max_size=10,
+            timeout=30,  # allows for Neon waking up from auto-suspend
+            max_inactive_connection_lifetime=120,  # drop idle conns before Neon suspends
+            statement_cache_size=0,  # safe with Neon's pooled (-pooler) endpoint too
+        )
         async with self.pool.acquire() as conn:
             await conn.execute(SCHEMA)
 
